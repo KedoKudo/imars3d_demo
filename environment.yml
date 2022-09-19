@@ -1,0 +1,11 @@
+name: imars3d_demo
+channels:
+  - conda-forge
+dependencies:
+  - pip
+  - dxchange
+  - panel
+  - param
+  - pytest
+  - pip:
+      - pytest-playwright
