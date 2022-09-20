@@ -3,6 +3,8 @@ channels:
   - conda-forge
 dependencies:
   - pip
+  - tomopy
+  - astropy
   - dxchange
   - panel
   - param
