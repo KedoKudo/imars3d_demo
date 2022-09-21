@@ -136,31 +136,72 @@ class load_data(param.ParameterizedFunction):
         return ct, ob, dc, rot_angles
 
 
-def _extract_rotation_angles(filelist: List[str]) -> np.ndarray:
+# use _func to avoid sphinx pulling it into docs
+def _forgiving_reader(
+    filename: str,
+    reader: Optional[Callable],
+) -> Optional[np.ndarray]:
     """
+    Skip corrupted file, but inform the user about the issue.
+    
+    Parameters
+    ----------
+    filename:
+        input filename
+    reader:
+        callable reader function that consumes the filename
+
+    Returns
+    -------
+        image as numpy array
     """
-    raise NotImplementedError
+    try:
+        return reader(filename)
+    except:
+        logger.error(f"Cannot read {filename}, skipping.")
+        return None
 
 
-def _load_by_dir(
-        ct_dir: str,
-        ob_dir: str,
-        dc_dir: Optional[str],
-        ct_regex: str,
-        ob_regex: str,
-        dc_regex: str,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+# use _func to avoid sphinx pulling it into docs
+def _load_images(
+    filelist: List[str],
+    desc: str,
+    max_workers: int,
+) -> np.ndarray:
     """
-    Load data by directory
-    """
-    raise NotImplementedError
-    # get all files
-    ct_files = list(Path(ct_dir).glob(ct_regex))
-    ob_files = list(Path(ob_dir).glob(ob_regex))
-    dc_files = list(Path(dc_dir).glob(dc_regex)) if dc_dir not in  ([], None) else []
+    Load image data via dxchange.
+    
+    Parameters
+    ----------
+    filelist:
+        List of images filenames/path for loading via dxchange.
+    desc:
+        Description for progress bar.
+    max_workers:
+        Maximum number of processes allowed during loading.
 
-    # load data
-    return _load_by_file_list(ct_files, ob_files, dc_files, ct_regex, ob_regex, dc_regex)
+    Returns
+    -------
+        Image array stack.
+    """
+    # figure out the file type and select corresponding reader from dxchange
+    file_ext = Path(filelist[0]).suffix.lower()
+    if file_ext in (".tif", ".tiff"):
+        reader = dxchange.read_tiff
+    elif file_ext == ".fits":
+        reader = dxchange.read_fits
+    else:
+        logger.error(f"Unsupported file type: {file_ext}")
+        raise ValueError("Unsupported file type.")
+    # read the data into numpy array via map_process
+    rst = process_map(
+        partial(_forgiving_reader, reader=reader),
+        filelist,
+        max_workers=max_workers,
+        desc=desc,
+    )
+    # return the results
+    return np.array([me for me in rst if me is not None])
 
 
 # use _func to avoid sphinx pulling it into docs
@@ -215,69 +256,44 @@ def _load_by_file_list(
     return ct, ob, dc
 
 
-# use _func to avoid sphinx pulling it into docs
-def _load_images(
-    filelist: List[str],
-    desc: str,
-    max_workers: int,
-) -> np.ndarray:
+# -----------------------------------
+# TODO
+def _extract_rotation_angles(filelist: List[str]) -> np.ndarray:
     """
-    Load image data via dxchange.
-    
+    """
+    raise NotImplementedError
+
+
+def _load_by_dir(
+        ct_dir: str,
+        ob_dir: str,
+        dc_dir: Optional[str],
+        ct_regex: str,
+        ob_regex: str,
+        dc_regex: str,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Load data by directory
+
     Parameters
     ----------
-    filelist:
-        List of images filenames/path for loading via dxchange.
-    desc:
-        Description for progress bar.
-    max_workers:
-        Maximum number of processes allowed during loading.
 
     Returns
     -------
-        Image array stack.
+
+    Notes
+    -----
+        If ob_regex is set to None, the data loader will attempt to read the metadata
+        embedded in the ct file to find obs with similar metadata.
     """
-    # figure out the file type and select corresponding reader from dxchange
-    file_ext = Path(filelist[0]).suffix.lower()
-    if file_ext in (".tif", ".tiff"):
-        reader = dxchange.read_tiff
-    elif file_ext == ".fits":
-        reader = dxchange.read_fits
-    else:
-        logger.error(f"Unsupported file type: {file_ext}")
-        raise ValueError("Unsupported file type.")
-    # read the data into numpy array via map_process
-    rst = process_map(
-        partial(_forgiving_reader, reader=reader),
-        filelist,
-        max_workers=max_workers,
-        desc=desc,
-    )
-    # return the results
-    return np.array([me for me in rst if me is not None])
+    raise NotImplementedError
+    # get all files
+    ct_files = list(Path(ct_dir).glob(ct_regex))
+    ob_files = list(Path(ob_dir).glob(ob_regex))
+    dc_files = list(Path(dc_dir).glob(dc_regex)) if dc_dir not in  ([], None) else []
+
+    # load data
+    return _load_by_file_list(ct_files, ob_files, dc_files, ct_regex, ob_regex, dc_regex)
 
 
-# use _func to avoid sphinx pulling it into docs
-def _forgiving_reader(
-    filename: str,
-    reader: Optional[Callable],
-) -> Optional[np.ndarray]:
-    """
-    Skip corrupted file, but inform the user about the issue.
-    
-    Parameters
-    ----------
-    filename:
-        input filename
-    reader:
-        callable reader function that consumes the filename
 
-    Returns
-    -------
-        image as numpy array
-    """
-    try:
-        return reader(filename)
-    except:
-        logger.error(f"Cannot read {filename}, skipping.")
-        return None
