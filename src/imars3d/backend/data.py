@@ -112,6 +112,7 @@ class load_data(param.ParameterizedFunction):
                     ob_regex=params.get("ob_regex", "\b*"),
                     dc_regex=params.get("dc_regex", "\b*"),
                 )
+            ct_files=params.get("ct_files")
         elif sigs == {"dir"}:
             logger.debug("Load by directory")
             ct, ob, dc = _load_by_dir(
@@ -122,6 +123,7 @@ class load_data(param.ParameterizedFunction):
                     ob_regex=params.get("ob_regex", "\b*"),
                     dc_regex=params.get("dc_regex", "\b*"),
                 )
+            ct_files = list(Path(params.get("ct_dir")).glob(params.get("ct_regex", "\b*")))
         else:
             logger.warning("Found unknown input arguments, ignoring.")
 
@@ -155,7 +157,7 @@ def _load_by_dir(
     # get all files
     ct_files = list(Path(ct_dir).glob(ct_regex))
     ob_files = list(Path(ob_dir).glob(ob_regex))
-    dc_files = list(Path(dc_dir).glob(dc_regex)) if dc_dir is not None else []
+    dc_files = list(Path(dc_dir).glob(dc_regex)) if dc_dir not in  ([], None) else []
 
     # load data
     return _load_by_file_list(ct_files, ob_files, dc_files, ct_regex, ob_regex, dc_regex)
@@ -169,6 +171,7 @@ def _load_by_file_list(
     ct_regex: Optional[str],
     ob_regex: Optional[str],
     dc_regex: Optional[str],
+    max_workers: int = 0,
 ) -> Tuple[np.ndarray]:
     """
     Use provided list of files to load images into memory.
@@ -189,12 +192,14 @@ def _load_by_file_list(
     ct = _load_images(
         filelist=[ctf for ctf in ct_files if re_ct.match(ctf)],
         desc="ct",
+        max_workers=max_workers,
     )
     # -- open beam
     re_ob = re.compile(ob_regex)
     ob = _load_images(
         filelist=[obf for obf in ob_files if re_ob.match(obf)],
         desc="ob",
+        max_workers=max_workers,
     )
     # -- dark current
     if dc_files == []:
@@ -204,6 +209,7 @@ def _load_by_file_list(
         dc = _load_images(
             filelist=[dcf for dcf in dc_files if re_dc.match(dcf)],
             desc="dc",
+            max_workers=max_workers,
         )
     #
     return ct, ob, dc

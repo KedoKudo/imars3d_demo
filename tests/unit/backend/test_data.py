@@ -8,8 +8,13 @@ import astropy.io.fits as fits
 import dxchange
 import numpy as np
 from functools import partial
+from unittest import mock
+from imars3d.backend.data import load_data
 from imars3d.backend.data import _forgiving_reader
 from imars3d.backend.data import _load_images
+from imars3d.backend.data import _load_by_file_list
+from imars3d.backend.data import _load_by_dir
+from imars3d.backend.data import _extract_rotation_angles
 
 
 @pytest.fixture(scope="module")
@@ -23,6 +28,40 @@ def test_data():
     # remove the test data
     os.remove("test.tiff")
     os.remove("test.fits")
+
+
+@mock.patch("imars3d.backend.data._extract_rotation_angles", return_value=4)
+@mock.patch("imars3d.backend.data._load_by_dir", return_value=("1", "2", "3"))
+@mock.patch("imars3d.backend.data._load_by_file_list", return_value=(1, 2, 3))
+def test_load_data(_load_by_file_list, _load_by_dir, _extract_rotation_angles):
+    # error_0: incorrect input argument types
+    with pytest.raises(ValueError):
+        load_data(ct_files=1, ob_files=[], dc_files=[])
+        load_data(ct_files=[], ob_files=[], dc_files=[], ct_regex=1)
+        load_data(ct_files=[], ob_files=[], dc_files=[], ob_regex=1)
+        load_data(ct_files=[], ob_files=[], dc_files=[], dc_regex=1)
+        load_data(ct_files=[], ob_files=[], dc_files=[], max_workers="x")
+    # error_1: out of bounds value
+    with pytest.raises(ValueError):
+        load_data(ct_files=[], ob_files=[], dc_files=[], max_workers=-1)
+    # error_2: mix usage of function signature 1 and 2
+    with pytest.raises(ValueError):
+        load_data(ct_files=[], ob_files=[], dc_files=[], ct_dir="/tmp", ob_dir="/tmp")
+    # case 1: load data from file list
+    rst = load_data(ct_files=["1", "2"], ob_files=["3", "4"], dc_files=["5", "6"])
+    assert rst == (1, 2, 3, 4)
+    # case 2: load data from given directory
+    rst = load_data(ct_dir="/tmp", ob_dir="/tmp", dc_dir="/tmp")
+    assert rst == ("1", "2", "3", 4)
+
+
+def test_forgiving_reader():
+    # correct usage
+    goodReader = lambda x: x
+    assert _forgiving_reader(filename="test", reader=goodReader) == "test"
+    # incorrect usage, but bypass the exception
+    badReader = lambda x: x/0
+    assert _forgiving_reader(filename="test", reader=badReader) is None
 
 
 def test_load_images(test_data):
@@ -41,13 +80,16 @@ def test_load_images(test_data):
     assert rst.shape == (2, 3, 3)
 
 
-def test_forgiving_reader():
-    # correct usage
-    goodReader = lambda x: x
-    assert _forgiving_reader(filename="test", reader=goodReader) == "test"
-    # incorrect usage, but bypass the exception
-    badReader = lambda x: x/0
-    assert _forgiving_reader(filename="test", reader=badReader) is None
+def test_load_by_file_list():
+    pass
+
+
+def test_load_by_dir():
+    pass
+
+
+def test_extract_rotation_angles():
+    pass
 
 
 if __name__ == "__main__":
