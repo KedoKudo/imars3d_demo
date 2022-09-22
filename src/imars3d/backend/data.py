@@ -2,13 +2,13 @@
 """
 Data handling for imars3d.
 """
-import re
 import param
 import multiprocessing
 import numpy as np
 import dxchange
 from functools import partial
 from pathlib import Path
+from fnmatch import fnmatchcase
 from typing import Optional, Tuple, List, Callable
 from tqdm.contrib.concurrent import process_map
 
@@ -36,12 +36,12 @@ class load_data(param.ParameterizedFunction):
         directory contains open beams
     dc_dir: Optional[str]
         directory contains dark currents
-    ct_regex: Optional[str]
-        regular expression for down selecting radiographs
-    ob_regex: Optional[str]
-        regular expression for down selecting open beams
-    dc_regex: Optional[str]
-        regular expression for down selecting dark current
+    ct_fnmatch: Optional[str]
+        Unix shells-style wild card ("*.tiff") for selecting radiographs
+    ob_fnmatch: Optional[str]
+        Unix shells-style wild card ("*.tiff") for selecting open beams
+    dc_fnmatch: Optional[str]
+        Unix shells-style wild card ("*.tiff") for selecting dark current
     max_workers: Optional[int]
         maximum number of processes allowed during loading, default to use as many as possible.
 
@@ -58,9 +58,9 @@ class load_data(param.ParameterizedFunction):
         The two signatures are mutually exclusive, and dc_files and dc_dir are optional
         in both cases as some experiments do not have dark current measurements.
 
-        The regex selectors are applicable in both signature, which help to down-select
+        The fnmatch selectors are applicable in both signature, which help to down-select
         files if needed. Default is set to "*", which selects everything.
-        Also, if ob_regex and dc_regex are set to "None" in the second signature call, the
+        Also, if ob_fnmatch and dc_fnmatch are set to "None" in the second signature call, the
         data loader will attempt to read the metadata embedded in the ct file to find obs
         and dcs with similar metadata.
 
@@ -77,9 +77,9 @@ class load_data(param.ParameterizedFunction):
     dc_dir = param.Foldername(doc="dark current directory")
     # NOTE: we need to provide a default value here as param.String default to "", which will
     #       not trigger dict.get(key, value) to get the value as "" is not None.
-    ct_regex = param.String(default="\b*", doc="regex for selecting ct files from ct_dir")
-    ob_regex = param.String(default="\b*", doc="regex for selecting ob files from ob_dir")
-    dc_regex = param.String(default="\b*", doc="regex for selecting dc files from dc_dir")
+    ct_fnmatch = param.String(default="*", doc="fnmatch for selecting ct files from ct_dir")
+    ob_fnmatch = param.String(default="*", doc="fnmatch for selecting ob files from ob_dir")
+    dc_fnmatch = param.String(default="*", doc="fnmatch for selecting dc files from dc_dir")
     # NOTE: 0 means use as many as possible
     max_workers = param.Integer(default=0, bounds=(0, None), doc="Maximum number of processes allowed during loading")
 
@@ -98,7 +98,7 @@ class load_data(param.ParameterizedFunction):
         # multiple dispatch
         # NOTE:
         #    use set to simplify call signature checking
-        sigs = set([k.split("_")[-1] for k in params.keys() if "regex" not in k])
+        sigs = set([k.split("_")[-1] for k in params.keys() if "fnmatch" not in k])
         if sigs == {"files", "dir"}:
             logger.error("Files and dir cannot be used at the same time")
             raise ValueError("Mix usage of allowed signature.")
@@ -108,22 +108,29 @@ class load_data(param.ParameterizedFunction):
                     ct_files=params.get("ct_files"),
                     ob_files=params.get("ob_files"),
                     dc_files=params.get("dc_files", []),  # it is okay to skip dc
-                    ct_regex=params.get("ct_regex", "\b*"),  # incase None got leaked here
-                    ob_regex=params.get("ob_regex", "\b*"),
-                    dc_regex=params.get("dc_regex", "\b*"),
+                    ct_fnmatch=params.get("ct_fnmatch", "*"),  # incase None got leaked here
+                    ob_fnmatch=params.get("ob_fnmatch", "*"),
+                    dc_fnmatch=params.get("dc_fnmatch", "*"),
                 )
             ct_files=params.get("ct_files")
         elif sigs == {"dir"}:
             logger.debug("Load by directory")
-            ct, ob, dc = _load_by_dir(
+            ct_files, ob_files, dc_files = _get_filelist_by_dir(
                     ct_dir=params.get("ct_dir"),
                     ob_dir=params.get("ob_dir"),
                     dc_dir=params.get("dc_dir", []),  # it is okay to skip dc
-                    ct_regex=params.get("ct_regex", "\b*"),  # incase None got leaked here
-                    ob_regex=params.get("ob_regex", "\b*"),
-                    dc_regex=params.get("dc_regex", "\b*"),
+                    ct_fnmatch=params.get("ct_fnmatch", "*"),  # incase None got leaked here
+                    ob_fnmatch=params.get("ob_fnmatch", "*"),
+                    dc_fnmatch=params.get("dc_fnmatch", "*"),
                 )
-            ct_files = list(Path(params.get("ct_dir")).glob(params.get("ct_regex", "\b*")))
+            ct, ob, dc = _load_by_file_list(
+                    ct_files=ct_files,
+                    ob_files=ob_files,
+                    dc_files=dc_files,
+                    ct_fnmatch=params.get("ct_fnmatch", "*"),  # incase None got leaked here
+                    ob_fnmatch=params.get("ob_fnmatch", "*"),
+                    dc_fnmatch=params.get("dc_fnmatch", "*"),
+                )
         else:
             logger.warning("Found unknown input arguments, ignoring.")
 
@@ -208,14 +215,36 @@ def _load_images(
 def _load_by_file_list(
     ct_files: List[str],
     ob_files: List[str],
-    dc_files: Optional[List[str]],
-    ct_regex: Optional[str],
-    ob_regex: Optional[str],
-    dc_regex: Optional[str],
+    dc_files: Optional[List[str]] = [],
+    ct_fnmatch: Optional[str] = "*",
+    ob_fnmatch: Optional[str] = "*",
+    dc_fnmatch: Optional[str] = "*",
     max_workers: int = 0,
 ) -> Tuple[np.ndarray]:
     """
     Use provided list of files to load images into memory.
+
+    Parameters
+    ----------
+    ct_files:
+        List of ct files.
+    ob_files:
+        List of ob files.
+    dc_files:
+        List of dc files.
+    ct_fnmatch:
+        fnmatch for selecting ct files from ct_dir.
+    ob_fnmatch:
+        fnmatch for selecting ob files from ob_dir.
+    dc_fnmatch:
+        fnmatch for selecting dc files from dc_dir.
+    max_workers:
+        Maximum number of processes allowed during loading, 0 means
+        use as many as possible.
+
+    Returns
+    -------
+        ct, ob, dc
     """
     # empty list is not allowed
     if ct_files == []:
@@ -229,16 +258,14 @@ def _load_by_file_list(
 
     # explicit list is the most straight forward solution
     # -- radiograph
-    re_ct = re.compile(ct_regex)
     ct = _load_images(
-        filelist=[ctf for ctf in ct_files if re_ct.match(ctf)],
+        filelist=[ctf for ctf in ct_files if fnmatchcase(ctf, ct_fnmatch)],
         desc="ct",
         max_workers=max_workers,
     )
     # -- open beam
-    re_ob = re.compile(ob_regex)
     ob = _load_images(
-        filelist=[obf for obf in ob_files if re_ob.match(obf)],
+        filelist=[obf for obf in ob_files if fnmatchcase(obf, ob_fnmatch)],
         desc="ob",
         max_workers=max_workers,
     )
@@ -246,14 +273,70 @@ def _load_by_file_list(
     if dc_files == []:
         dc = None
     else:
-        re_dc = re.compile(dc_regex)
         dc = _load_images(
-            filelist=[dcf for dcf in dc_files if re_dc.match(dcf)],
+            filelist=[dcf for dcf in dc_files if fnmatchcase(dcf, dc_fnmatch)],
             desc="dc",
             max_workers=max_workers,
         )
     #
     return ct, ob, dc
+
+
+def _get_filelist_by_dir(
+        ct_dir: str,
+        ob_dir: str,
+        dc_dir: Optional[str],
+        ct_fnmatch: Optional[str] = "*",
+        ob_fnmatch: Optional[str] = "*",
+        dc_fnmatch: Optional[str] = "*",
+    ) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Generate list of files from given directory and fnmatch for ct, ob, and dc.
+
+    Parameters
+    ----------
+    ct_dir:
+        Directory for ct files.
+    ob_dir:
+        Directory for ob files.
+    dc_dir:
+        Directory for dc files.
+    ct_fnmatch:
+        fnmatch for selecting ct files from ct_dir.
+    ob_fnmatch:
+        fnmatch for selecting ob files from ob_dir.
+    dc_fnmatch:
+        fnmatch for selecting dc files from dc_dir.
+
+    Returns
+    -------
+        ct_files, ob_files, dc_files
+
+    Notes
+    -----
+        If ob_fnmatch is set to None, the data loader will attempt to read the metadata
+        embedded in the ct file to find obs with similar metadata.
+    """
+    # make sure ct_dir and ob_dir exist, throw warning if dc_dir does not exist or is None
+    # gather the ct_files
+    #   this has to work, no branching here
+    # gather the ob_files
+    #   if ob_fnmatch is None, use the metadata to find the obs
+    #   else generate the list of files
+    # gather the dc_files
+    #   if dc_dir is None or invalid,  set dc_files to None
+    #   else
+    #       if dc_fnmatch is None, use the metadata to find the dcs
+    #       else generate the list of files
+    raise NotImplementedError
+    # get all files
+    ct_files = list(Path(ct_dir).glob(ct_fnmatch))
+    ob_files = list(Path(ob_dir).glob(ob_fnmatch))
+    dc_files = list(Path(dc_dir).glob(dc_fnmatch)) if dc_dir not in  ([], None) else []
+
+    # load data
+    return _load_by_file_list(ct_files, ob_files, dc_files, ct_fnmatch, ob_fnmatch, dc_fnmatch, max_workers)
+
 
 
 # -----------------------------------
@@ -262,38 +345,6 @@ def _extract_rotation_angles(filelist: List[str]) -> np.ndarray:
     """
     """
     raise NotImplementedError
-
-
-def _load_by_dir(
-        ct_dir: str,
-        ob_dir: str,
-        dc_dir: Optional[str],
-        ct_regex: str,
-        ob_regex: str,
-        dc_regex: str,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Load data by directory
-
-    Parameters
-    ----------
-
-    Returns
-    -------
-
-    Notes
-    -----
-        If ob_regex is set to None, the data loader will attempt to read the metadata
-        embedded in the ct file to find obs with similar metadata.
-    """
-    raise NotImplementedError
-    # get all files
-    ct_files = list(Path(ct_dir).glob(ct_regex))
-    ob_files = list(Path(ob_dir).glob(ob_regex))
-    dc_files = list(Path(dc_dir).glob(dc_regex)) if dc_dir not in  ([], None) else []
-
-    # load data
-    return _load_by_file_list(ct_files, ob_files, dc_files, ct_regex, ob_regex, dc_regex)
 
 
 
