@@ -2,10 +2,12 @@
 """
 Data handling for imars3d.
 """
+import re
 import param
 import multiprocessing
 import numpy as np
 import dxchange
+import tifffile
 from functools import partial
 from pathlib import Path
 from fnmatch import fnmatchcase
@@ -16,6 +18,14 @@ from tqdm.contrib.concurrent import process_map
 # setup module level logger
 logger = param.get_logger()
 logger.name = __name__
+metadata_dict = {
+    65026: 'ManufacturerStr:Andor',  # [ct, ob, dc]
+    65027: 'ExposureTime:70.000000',  # [ct, ob, dc]
+    65068: 'MotSlitHR.RBV:10.000000',  # APERTURE_HR, [ct, ob]
+    65070: 'MotSlitHL.RBV:20.000000',  # APERTURE_HL, [ct, ob]
+    65066: 'MotSlitVT.RBV:10.000000',  # APERTURE_VT, [ct, ob]
+    65068: 'MotSlitHR.RBV:10.000000',  # APERTURE_VB, [ct, ob]
+}
 
 
 class load_data(param.ParameterizedFunction):
@@ -285,7 +295,7 @@ def _load_by_file_list(
 def _get_filelist_by_dir(
         ct_dir: str,
         ob_dir: str,
-        dc_dir: Optional[str],
+        dc_dir: Optional[str] = None,
         ct_fnmatch: Optional[str] = "*",
         ob_fnmatch: Optional[str] = "*",
         dc_fnmatch: Optional[str] = "*",
@@ -317,34 +327,112 @@ def _get_filelist_by_dir(
         If ob_fnmatch is set to None, the data loader will attempt to read the metadata
         embedded in the ct file to find obs with similar metadata.
     """
-    # make sure ct_dir and ob_dir exist, throw warning if dc_dir does not exist or is None
+    # sanity check
+    # -- radiograph
+    if not Path(ct_dir).exists():
+        logger.error(f"ct_dir {ct_dir} does not exist.")
+        raise ValueError("ct_dir does not exist.")
+    else:
+        ct_dir = Path(ct_dir)
+    # -- open beam
+    if not Path(ob_dir).exists():
+        logger.error(f"ob_dir {ob_dir} does not exist.")
+        raise ValueError("ob_dir does not exist.")
+    else:
+        ob_dir = Path(ob_dir)
+    # -- dark current
+    if dc_dir is None:
+        logger.warning("dc_dir is None.")
+    elif not Path(dc_dir).exists():
+        logger.warning(f"dc_dir {dc_dir} does not exist, treating as None.")
+        dc_dir = None
+    else:
+        dc_dir = Path(dc_dir)
+
     # gather the ct_files
-    #   this has to work, no branching here
+    ct_files = ct_dir.glob(ct_fnmatch)
+
     # gather the ob_files
-    #   if ob_fnmatch is None, use the metadata to find the obs
-    #   else generate the list of files
+    if ob_fnmatch is None:
+        raise NotImplementedError("ob_fnmatch is None is not implemented yet.")
+    else:
+        ob_files = ob_dir.glob(ob_fnmatch)
+
     # gather the dc_files
-    #   if dc_dir is None or invalid,  set dc_files to None
-    #   else
-    #       if dc_fnmatch is None, use the metadata to find the dcs
-    #       else generate the list of files
-    raise NotImplementedError
-    # get all files
-    ct_files = list(Path(ct_dir).glob(ct_fnmatch))
-    ob_files = list(Path(ob_dir).glob(ob_fnmatch))
-    dc_files = list(Path(dc_dir).glob(dc_fnmatch)) if dc_dir not in  ([], None) else []
+    if dc_dir is None:
+        dc_files = []
+    else:
+        if dc_fnmatch is None:
+            raise NotImplementedError("dc_fnmatch is None is not implemented yet.")
+        else:
+            dc_files = dc_dir.glob(dc_fnmatch)
 
-    # load data
-    return _load_by_file_list(ct_files, ob_files, dc_files, ct_fnmatch, ob_fnmatch, dc_fnmatch, max_workers)
+    return list(map(str, ct_files)), list(map(str, ob_files)), list(map(str, dc_files))
 
 
+def _extract_rotation_angles(
+    filelist: List[str],
+    metadata_idx: int=65039,
+    ) -> np.ndarray:
+    """
+    Extract rotation angles in degrees from filename or metadata.
+
+    Parameters
+    ----------
+    filelist:
+        List of files to extract rotation angles from.
+    metadata_idx:
+        Index of metadata to extract rotation angle from, default is 65039.
+
+    Returns
+    -------
+        rotation_angles
+    """
+    # sanity check
+    if filelist == []:
+        logger.error("filelist is [].")
+        raise ValueError("filelist cannot be empty list.")
+
+    # extract rotation angles from file names
+    # Note
+    # ----
+    #   For the following file
+    #       20191030_ironman_small_0070_300_440_0520.tiff
+    #   the rotation angle is 300.44 degrees
+    # If all given filenames follows the pattern, we will use the angles from
+    # filenames. Otherwise, we will use the angles from metadata.
+    regex = r"\d{8}_\S*_\d{4}_(?P<deg>\d{3})_(?P<dec>\d{3})_\d*\.tiff"
+    matches = [re.match(regex, Path(f).name) for f in filelist]
+    if all(matches):
+        rotation_angles = np.array(
+            [ float(".".join(m.groups())) for m in matches]
+        )
+    else:
+        # extract rotation angles from metadata
+        file_ext = set([Path(f).suffix for f in filelist])
+        if file_ext != {".tiff"}:
+            logger.error("Only tiff files are supported.")
+            raise ValueError("Rotation angle from metadata is only supported for Tiff.")
+        # -- read metadata
+        # img = tifffile.TiffFile("test_with_metadata_0.tiff")
+        # img.pages[0].tags[65039].value
+        # >> 'RotationActual:0.579840'
+        rotation_angles = np.array([
+            float(tifffile.TiffFile(f).pages[0].tags[metadata_idx].value.split(":")[-1])
+            for f in filelist
+        ])
+    return rotation_angles
 
 # -----------------------------------
 # TODO
-def _extract_rotation_angles(filelist: List[str]) -> np.ndarray:
-    """
-    """
-    raise NotImplementedError
+# def _filter_by_metadata():
+#     """
+#     TODO: waiting on TIFFMetaData class
+#     """
+#     raise NotImplementedError
+
+
+
 
 
 
